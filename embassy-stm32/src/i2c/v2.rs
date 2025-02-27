@@ -573,12 +573,6 @@ impl<'d> I2c<'d, Async> {
 
         let mut remaining_len = total_len;
 
-        let autoend = if total_len > 255 {
-            Stop::Software
-        } else {
-            Stop::Automatic
-        };
-
         let on_drop = OnDrop::new(|| {
             let regs = self.info.regs;
             regs.cr1().modify(|w| {
@@ -618,14 +612,15 @@ impl<'d> I2c<'d, Async> {
                     self.info,
                     address,
                     total_len.min(255),
-                    autoend.clone(),
+                    Stop::Automatic,
                     total_len > 255,
                     restart,
                     timeout,
                 )?;
-            } else if remaining_len == 0 {
-                return Poll::Ready(Ok(()));
-            } else if !(isr.tcr() || isr.tc()) {
+                if total_len <= 255 {
+                    return Poll::Ready(Ok(()));
+                }
+            } else if isr.tcr() {
                 // poll_fn was woken without an interrupt present
                 return Poll::Pending;
             } else {
@@ -633,6 +628,9 @@ impl<'d> I2c<'d, Async> {
 
                 if let Err(e) = Self::master_continue(self.info, remaining_len.min(255), !last_piece, timeout) {
                     return Poll::Ready(Err(e));
+                }
+                if last_piece {
+                    return Poll::Ready(Ok(()));
                 }
                 self.info.regs.cr1().modify(|w| w.set_tcie(true));
             }
@@ -643,12 +641,6 @@ impl<'d> I2c<'d, Async> {
         .await?;
 
         dma_transfer.await;
-
-        if autoend == Stop::Software {
-            // This should be done already
-            self.wait_tc(timeout)?;
-            self.master_stop()
-        }
 
         drop(on_drop);
 
